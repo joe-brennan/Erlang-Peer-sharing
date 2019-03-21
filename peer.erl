@@ -1,5 +1,5 @@
--module(peer).
--export([setup/0, peer/2,peerServer/1,lookup/2,peerUser/2,findPeers/2]).
+-module(jb2050).
+-export([setup/0, peer/2,peerServer/1,lookup/2,peerUser/2]).
 
 peer(Index, DB) ->
 	%% Starts the 'user' part of the peer
@@ -7,6 +7,7 @@ peer(Index, DB) ->
   	%% Starts the 'file server' part of the peer
   	peerServer(DB).
 
+%% peerServer implementation according to the CFSM given.q
 peerServer(DB) ->
   	receive
     	{add, Id,Content} ->
@@ -15,21 +16,23 @@ peerServer(DB) ->
     	{request, Peer, Id} ->
       	%% Calls the lookup function and gets the content from the tuple
 			  Result = lookup(Id,DB),
-
+			  
       		if
-        		Result == none ->
-          		Peer!notFound,
-          		peerServer(DB);
+        		Result /= none ->
+                Val = element(2, Result),
+                Peer!{found,Id,Val},
+                peerServer(DB);
 			%% If the result is not 'none', get the Value received, and send it back to Peer.
         	true ->
-          		Val = element(2, Result),
-          		Peer!{found,Id,Val},
-          		peerServer(DB)
+            Peer!notFound,
+
+            peerServer(DB)
+          		
         end
       end.
 
 -spec lookup(K, list({K, V})) -> none | {some, V}.
-%% Looks up an item Id in a peers server, sends the value of the id if found.
+%% Looks up an item Id in a peers server, returns the value of the id if found.
 lookup(_Id, []) ->
   none;
 lookup(Id, [{Id,Value}|_DB]) ->
@@ -38,80 +41,50 @@ lookup(Id, [{_Key,_Value}|DB]) ->
   lookup(Id, DB).
 
 peerUser(Index, PeerServer) ->
-  timer:sleep(2000),
 
   %% Every two seconds request Catalog from index process
+  timer:sleep(2000),
   Index!{getCatalog, self()},
+
+  %% Receive the catalog
   receive
     {ok, Catalog} ->
 
-      %% Picks a random number from 0-n, n being the size of the catalog, then
-      %% gets catalog entry of n. e.g. Random returns {1000,[pid1,pid2,..]}
+      %% Picks a random number between 1 and n, n being the size of the catalog, then
+      %% gets the catalog entry of n. e.g. Random returns {1000,[pid1,pid2,..]}
       RandomEntry = lists:nth(rand:uniform(length(Catalog)), Catalog),
+      
       %% Gets the itemId from the catalog entry, e.g. returns 1000
       RandomId = element(1, RandomEntry),
 
-      %% Find a peer who has the item,
-      PeerOwners = findPeers(Catalog,RandomId),
+      %% Gets the of peers who have the random item,
+      PeerOwners = element(2, RandomEntry),
 
-      if
-        %% If no peer owns the item, try again by going back to peerUser/2
-        PeerOwners == [] ->
-          peerUser(Index, PeerServer);
+      %% Check to see if self() already has the random item.
+      PeerServer!{request, self(), RandomId},
+    
+      receive
+        %% If the peer already has the item go back to the start of peerUser/2            
+        {found,_Id,_Content} ->
+            peerUser(Index, PeerServer);  
 
-        true ->
-
-          %% If peers found, get a random peer from the list of owners
-          RandomPeer = lists:nth(rand:uniform(length(PeerOwners)), PeerOwners),
-
-          %% Check that the peer is not self()
-          if
-            RandomPeer == PeerServer ->
-              peerUser(Index, PeerServer);
-
-            true ->
-              %% Check to see if self() already has the item.
-              PeerServer!{request, self(), RandomId},
-
-              receive
-                %% If self() has the item, go back to peerUser/2 and try again
-                {found,_Id,_Content} ->
-                  peerUser(Index, PeerServer);
-                notFound ->
-                  %% Otherwise, requests that item from the random peer
-                  RandomPeer!{request, self(),RandomId},
-                  receive
-                    %% If successful, receive that item from the other peer
-                    {found,Id,Content} ->
-                      %% Add the item to its own database by sending its own peer server an add message
-                      PeerServer!{add,Id,Content},
-
-                      %% Notify the index that the peer server is now an owner of this item.
-                      Index!{addOwner,Id,PeerServer},
-
-                      %% Continue updating the catalog and requesting files
-                      peerUser(Index, PeerServer);
-
-                    %% If not found. try again.
-                    notFound ->
-                      peerUser(Index, PeerServer)
-                  end
-              end
+        %% If self() doesn't have the item, request the item from a random peer from the PeerOwners list
+        notFound ->
+            RandomPeer = lists:nth(rand:uniform(length(PeerOwners)), PeerOwners),
+            %% Request the item
+            RandomPeer!{request, self(),RandomId},
+            receive
+                %% Receive the item
+                {found,Id,Content} ->
+                  %% Add the item to own database by sending its own peer server an add message
+                  PeerServer!{add,Id,Content},
+                  %% Notify the index that the peer server is now an owner of this item.
+                  Index!{addOwner,Id,PeerServer},
+                  %% Continue updating the catalog and requesting files by going to the start of peerUser/2
+                  peerUser(Index, PeerServer)
           end
       end
   end.
-
-
-%% Finds a peer from the catalog who owns an Id given as a parameter. Returns
-%% The first peer who owns the Id
-findPeers([],_Id) ->
-  [];
-
-findPeers([{Id,Peers}|_Catalog],Id) ->
-  Peers;
-findPeers([{_X,_Peers}|Catalog],Id) ->
-  findPeers(Catalog,Id).
-
 
 %% Setup function which spawns a single indexId
 setup() ->
