@@ -1,7 +1,7 @@
 %% Author: Joseph Brennan
 %% Date: 28/03/19
 
--module(jb2050).
+-module(peerclient).
 -export([setup/0, peer/2,peerServer/1,lookup/2,peerUser/2]).
 
 %% The top-level of a peer
